@@ -1,0 +1,19 @@
+[project]
+name = "fruitpicker"
+version = "0.1.0"
+description = "Apple Music Recorder - Record songs from Apple Music"
+requires-python = ">=3.10"
+dependencies = [
+    "selenium>=4.0.0",
+    "sounddevice>=0.4.0",
+    "numpy>=1.20.0",
+    "mutagen>=1.46.0",
+    "ffmpeg-python>=0.2.0",
+]
+
+[project.scripts]
+apple-music-recorder = "apple_music_recorder:main"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"

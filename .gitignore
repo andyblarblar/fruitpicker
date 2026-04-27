@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Runtime files
+recorder.log
+recordings/
+
+# Binary files
+bin/chromedriver
+*.bin
+
+# Scratch files
+#scratch/
+
+browser_profile
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Config files with sensitive data
+config.local.json

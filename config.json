@@ -1,0 +1,30 @@
+{
+    "apple_music_url": "https://music.apple.com",
+    "playlist_url": null,
+    "browser": {
+        "type": "chrome",
+        "headless": false,
+        "window_size": [1920, 1080]
+    },
+    "recording": {
+        "sample_rate": 44100,
+        "channels": 2,
+        "chunk_duration": 0.1
+    },
+    "output": {
+        "directory": "./recordings",
+        "bitrate": "320k",
+        "naming_convention": "{artist}_{title}",
+        "max_songs": -1
+    },
+    "navigation": {
+        "next_button_selector": "button.next, a.next, [aria-label='Next']",
+        "navigation_delay": 2.0,
+        "track_list_item_selector": "[data-testid='track-list-item']"
+    },
+    "logging": {
+        "level": "INFO",
+        "log_file": "./recorder.log",
+        "log_format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    }
+}
