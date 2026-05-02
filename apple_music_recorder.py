@@ -39,6 +39,7 @@ from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.firefox.options import Options as FirefoxOptions
+from selenium.webdriver.remote.webelement import WebElement
 
 
 class AppleMusicRecorder:
@@ -52,7 +53,6 @@ class AppleMusicRecorder:
 
         # Recording state
         self.is_recording = False
-        self.is_paused = False
         self.stop_event = Event()
         self._audio_lock = Lock()
         self.current_recording = None
@@ -97,8 +97,6 @@ class AppleMusicRecorder:
                 "max_songs": -1
             },
             "navigation": {
-                "next_button_selector": "button.next, a.next, [aria-label='Next']",
-                "navigation_delay": 2.0,
                 "track_list_item_selector": "[data-testid='track-list-item']"
             },
             "logging": {
@@ -137,7 +135,7 @@ class AppleMusicRecorder:
         # File handler
         log_file = log_config.get("log_file", "./recorder.log")
         file_handler = logging.FileHandler(log_file)
-        file_handler.setLevel(log_level)
+        file_handler.setLevel("DEBUG")
         file_handler.setFormatter(logging.Formatter(log_format))
         logging.getLogger().addHandler(file_handler)
 
@@ -287,7 +285,7 @@ class AppleMusicRecorder:
             self.logger.debug(f"Error checking login status: {e}")
             return False
 
-    def _detect_song_change(self) -> dict:
+    def _get_current_song_info(self) -> dict:
         """Detect the current song information from the DOM.
 
         The player LCD title/artist live inside the shadow DOM of <amp-lcd>, so we
@@ -341,7 +339,7 @@ class AppleMusicRecorder:
 
             # FALLBACK: If shadow DOM query failed, try the regular track list
             if not song_info["title"]:
-                self.logger.debug("Shadow DOM title not found, falling back to track list...")
+                self.logger.info("Shadow DOM title not found, falling back to track list...")
                 track_list_items = self.driver.find_elements(By.CSS_SELECTOR, "[data-testid='track-list-item']")
                 for item in track_list_items[:5]:
                     try:
@@ -379,29 +377,6 @@ class AppleMusicRecorder:
             self.logger.warning(f"Error detecting song info: {e}")
 
         return song_info
-
-    def _find_next_button(self) -> bool:
-        """Find and click the next button."""
-        nav_config = self.config.get("navigation", {})
-        next_button_selector = nav_config.get("next_button_selector", "button.next, a.next, [aria-label='Next']")
-        navigation_delay = nav_config.get("navigation_delay", 2.0)
-
-        try:
-            next_buttons = self.driver.find_elements(By.CSS_SELECTOR, next_button_selector.replace(", ", ","))
-            if not next_buttons:
-                next_buttons = self.driver.find_elements(By.XPATH, f"//{next_button_selector}")
-
-            if next_buttons:
-                next_button = next_buttons[0]
-                if next_button.is_enabled() and next_button.is_displayed():
-                    self.logger.info("Clicking next button")
-                    self.driver.execute_script("arguments[0].click();", next_button)
-                    time.sleep(navigation_delay)
-                    return True
-        except Exception as e:
-            self.logger.warning(f"Error clicking next button: {e}")
-
-        return False
 
     def _is_lcd_showing_play_button(self) -> bool:
         """Return True when LCD shows Play (and not Pause), indicating playback stopped.
@@ -561,7 +536,7 @@ class AppleMusicRecorder:
             if status:
                 self.logger.warning("Audio callback status: %s", status)
 
-            if not self.is_recording or self.is_paused:
+            if not self.is_recording:
                 return
 
             # indata is already int16 (dtype set on the stream); just copy the bytes
@@ -800,62 +775,30 @@ class AppleMusicRecorder:
                 self.driver.execute_script("arguments[0].click();", play_button)
                 self.logger.info("Play button clicked. Waiting for song to start...")
                 time.sleep(2)
-
-                # Also click the playback-play__pause button if it exists, as clicking the playlist play button might not start playback
-                # This button is nested inside multiple shadow roots: amp-chrome-player -> apple-music-playback-controls
-                try:
-                    self.logger.info("Attempting to find and click playback-play__pause button in shadow DOM...")
-
-                    # 1. Find the first shadow host
-                    player_host = self.driver.find_element(By.CSS_SELECTOR, "amp-chrome-player")
-                    player_shadow = player_host.shadow_root
-
-                    # 2. Find the second shadow host inside the first shadow root
-                    controls_host = player_shadow.find_element(By.CSS_SELECTOR, "apple-music-playback-controls")
-                    controls_shadow = controls_host.shadow_root
-
-                    # 3. Find the play/pause button in the second shadow root
-                    playback_button = controls_shadow.find_element(By.CSS_SELECTOR, ".playback-play__pause")
-
-                    self.logger.info("Found playback-play__pause button. Clicking...")
-                    self.driver.execute_script("arguments[0].click();", playback_button)
-                    time.sleep(2)
-                except Exception as e:
-                    self.logger.warning(f"Could not click playback-play__pause button via shadow DOM: {e}")
-
-                time.sleep(3)
             except Exception as e:
                 self.logger.warning(f"Failed to click play button: {e}")
 
         # Detect first song
-        song_info = self._detect_song_change()
-        if song_info["title"]:
-            self.logger.info(f"Detected initial song: {song_info['title']} by {song_info['artist']}")
-            self._handle_song_start(song_info)
-            self._start_recording()
-        else:
-            self.logger.warning("Could not detect initial song. Waiting and trying again...")
-            time.sleep(5)
-
-            # Try clicking play button again if still visible
-            play_buttons = self.driver.find_elements(By.CSS_SELECTOR, "[data-testid='play-button']")
-            if play_buttons:
-                self.logger.info("Still showing play button. Clicking again...")
-                try:
-                    play_button = play_buttons[0]
-                    self.driver.execute_script("arguments[0].click();", play_button)
-                    time.sleep(5)
-                except Exception as e:
-                    self.logger.warning(f"Failed to click play button: {e}")
-
-            song_info = self._detect_song_change()
+        song_info = {}
+        while not song_info.get("title"):
+            song_info = self._get_current_song_info()
             if song_info["title"]:
                 self.logger.info(f"Detected initial song: {song_info['title']} by {song_info['artist']}")
                 self._handle_song_start(song_info)
                 self._start_recording()
             else:
-                self.logger.error("Could not detect any song. Exiting.")
-                return
+                self.logger.warning("Could not detect initial song. Waiting and trying again...")
+                time.sleep(2)
+
+        # Click play btn after recording starts so we don't miss audio
+        try:
+            self.logger.info("Attempting to find and click playback-play__pause button in shadow DOM...")
+            playback_button = self._click_play_btn()
+
+            if playback_button is None:
+                raise Exception("Could not find playback-play__pause button")
+        except Exception as e:
+            self.logger.warning(f"Could not click playback-play__pause button via shadow DOM: {e}")
 
         # Main loop
         while not self.stop_event.is_set():
@@ -872,16 +815,14 @@ class AppleMusicRecorder:
             else:
                 self._play_button_visible_streak = 0
 
-            if self._play_button_visible_streak >= 3:
+            if self._play_button_visible_streak >= 10:
                 self.logger.info("Detected LCD Play button state at playlist end. Stopping recorder.")
-                if self.is_recording:
-                    self._discard_current_recording("playlist ended")
                 self.stop()
-                return
+                continue
 
             # End the current recording when Apple Music advances to a new title.
             if self.is_recording and self.current_recording:
-                current_song = self._detect_song_change()
+                current_song = self._get_current_song_info()
                 current_title = (current_song.get("title") or "").strip()
                 recording_title = (self.current_recording.get("title") or "").strip()
 
@@ -895,35 +836,49 @@ class AppleMusicRecorder:
                         self.logger.info(
                             f"Song change detected: '{recording_title}' -> '{current_title}'"
                         )
+                        # Click play to pause new song while we save
+                        self._click_play_btn()
+
                         self._handle_song_end()
-                        # Small delay to let DOM settle after playback transition
-                        time.sleep(0.5)
                         self._handle_song_start(current_song)
                         self._start_recording()
+
+                        # TODO also reset song
+                        self._click_play_btn()
                         continue
+        # This else runs when stop is called
+        else:
+            self.logger.info("Playlist processing stopped")
+            self._discard_current_recording("stopped")
 
-            # If not recording and we have a valid state, try next song
-            if not self.is_recording and not self.stop_event.is_set():
-                # Detect current song
-                current_song = self._detect_song_change()
+    def _click_play_btn(self) -> WebElement | None:
+        """
+        Clicks and then returns the play/pause button element within the Apple Music player's shadow DOM structure.
 
-                # Check if we've moved to a new song (with bounds check)
-                last_song = self.recorded_songs[-1]["song_info"] if len(self.recorded_songs) > 0 else None
+        Returns:
+            WebElement: The play/pause button element if found, otherwise None.
+        """
+        # 1. Find the first shadow host
+        player_host = self.driver.find_element(By.CSS_SELECTOR, "amp-chrome-player")
+        player_shadow = player_host.shadow_root
 
-                if current_song["title"] and (last_song is None or current_song["title"] != last_song.get("title")):
-                    self.logger.info(f"New song detected: {current_song['title']}")
-                    self._handle_song_start(current_song)
-                    self._start_recording()
-                else:
-                    # Try to navigate to next song
-                    if not self._find_next_button():
-                        self.logger.warning("Could not find next button. Trying keyboard shortcut...")
-                        # Try keyboard shortcut (usually 'J' or 'Right arrow' for next)
-                        from selenium.webdriver.common.keys import Keys
-                        from selenium.webdriver.common.action_chains import ActionChains
-                        actions = ActionChains(self.driver)
-                        actions.send_keys(Keys.ARROW_RIGHT).perform()
-                        time.sleep(self.config.get("navigation", {}).get("navigation_delay", 2.0))
+        # 2. Find the second shadow host inside the first shadow root
+        controls_host = player_shadow.find_element(By.CSS_SELECTOR, "apple-music-playback-controls")
+        controls_shadow = controls_host.shadow_root
+
+        # 3. Find the play/pause button in the second shadow root
+        playback_button_pause = controls_shadow.find_element(By.CSS_SELECTOR, ".playback-play__pause")
+        playback_button_play = controls_shadow.find_element(By.CSS_SELECTOR, ".playback-play__play")
+
+        if not (playback_button_pause or playback_button_play):
+            return None
+        else:
+            active_btn = playback_button_pause if playback_button_pause else playback_button_play
+
+        self.logger.info(f"Found playback-play__pause button. {active_btn} Clicking...")
+        self.driver.execute_script("arguments[0].click();", active_btn)
+
+        return active_btn
 
     def _cleanup(self):
         """Clean up resources."""
@@ -962,7 +917,7 @@ class AppleMusicRecorder:
             # Navigate to Apple Music and check login status
             login_success = self._navigate_to_music()
 
-            if not login_success:
+            if not login_success:  # TODO this login check doesnt work
                 # Try one more time with extended wait
                 self.logger.info("Attempting extended login wait...")
                 self.logger.info("Please login to Apple Music in the browser window.")
@@ -999,17 +954,6 @@ class AppleMusicRecorder:
         self.logger.info("Stopping recorder...")
         self.stop_event.set()
         self.is_recording = False
-        self.is_paused = False
-
-    def pause(self):
-        """Pause recording."""
-        self.logger.info("Pausing recording...")
-        self.is_paused = True
-
-    def resume(self):
-        """Resume recording."""
-        self.logger.info("Resuming recording...")
-        self.is_paused = False
 
     def _print_summary(self):
         """Print recording summary."""

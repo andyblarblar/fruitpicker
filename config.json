@@ -18,8 +18,6 @@
         "max_songs": -1
     },
     "navigation": {
-        "next_button_selector": "button.next, a.next, [aria-label='Next']",
-        "navigation_delay": 2.0,
         "track_list_item_selector": "[data-testid='track-list-item']"
     },
     "logging": {
