@@ -36,6 +36,7 @@ import ffmpeg
 import sounddevice as sd
 from mutagen.id3 import ID3, TIT2, TPE1, ID3NoHeaderError
 from selenium import webdriver
+from selenium.webdriver import ActionChains, Keys
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.firefox.options import Options as FirefoxOptions
@@ -807,7 +808,7 @@ class AppleMusicRecorder:
                 break
 
             # Wait for recording to complete
-            time.sleep(0.1)
+            time.sleep(0.05)
 
             # Exit cleanly when playback reaches playlist end and LCD returns to Play.
             if self._is_lcd_showing_play_button():
@@ -815,7 +816,7 @@ class AppleMusicRecorder:
             else:
                 self._play_button_visible_streak = 0
 
-            if self._play_button_visible_streak >= 10:
+            if self._play_button_visible_streak >= 1000:
                 self.logger.info("Detected LCD Play button state at playlist end. Stopping recorder.")
                 self.stop()
                 continue
@@ -841,10 +842,12 @@ class AppleMusicRecorder:
 
                         self._handle_song_end()
                         self._handle_song_start(current_song)
-                        self._start_recording()
 
-                        # TODO also reset song
+                        # Reset song to start because it can take a second for the title to load
+                        self._reset_progress_bar()
                         self._click_play_btn()
+                        time.sleep(0.05)
+                        self._start_recording()
                         continue
         # This else runs when stop is called
         else:
@@ -879,6 +882,29 @@ class AppleMusicRecorder:
         self.driver.execute_script("arguments[0].click();", active_btn)
 
         return active_btn
+
+    def _reset_progress_bar(self) -> None:
+        """
+        Sets the progress bar to 0%.
+        """
+        # bar is in lcd shadow root
+        player_host = self.driver.find_element(By.CLASS_NAME, "lcd")
+        player_shadow = player_host.shadow_root
+
+        # Main clickable progress bar
+        progress_bar: WebElement = player_shadow.find_element(By.CSS_SELECTOR, "#playback-progress")
+
+        # Use navigation as anchor for left side of screen
+        navi = self.driver.find_element(By.CSS_SELECTOR, "#navigation")
+
+        # Reset progress bar by clicking the middle and then dragging to navi
+        if progress_bar:
+            self.logger.info(f"Found progress bar. Setting to 0%...")
+            ActionChains(self.driver).move_to_element(progress_bar).click_and_hold(progress_bar).move_to_element(
+                navi).pause(0.3).release().perform()
+            self.logger.info(f"Set to 0%")
+        else:
+            self.logger.warning("Could not find progress bar. Skipping reset.")
 
     def _cleanup(self):
         """Clean up resources."""
