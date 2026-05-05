@@ -732,24 +732,6 @@ class AppleMusicRecorder:
                 current_title = current_song.title.strip()
                 recording_title = self.current_recording.title.strip()
 
-                # Skip song if song exists in recorded directory
-                if Song(sanitize(current_song.title), sanitize(current_song.artist)) in self._songs_at_start:
-                    self.logger.info(f"Skipping song '{current_title}' as it already exists in recorded directory.")
-                    self._discard_current_recording("song exists in recorded directory")
-
-                    # Start next song
-                    self._click_next_btn()
-                    time.sleep(1)
-                    self._click_play_btn()
-
-                    new_song = self._get_current_song_info()
-                    self._handle_song_start(new_song)
-
-                    self._reset_progress_bar()
-                    self._start_recording()
-                    self._click_play_btn()
-                    continue
-
                 # Only log if titles are found (avoid spam)
                 if current_title and recording_title:
                     self.logger.debug(
@@ -767,6 +749,24 @@ class AppleMusicRecorder:
                         self._handle_song_start(current_song)
 
                         # Reset song to start because it can take a second for the title to load
+                        self._reset_progress_bar()
+                        self._start_recording()
+                        self._click_play_btn()
+                        continue
+                    # Skip song if song exists in recorded directory
+                    elif Song(sanitize(current_song.title), sanitize(current_song.artist)) in self._songs_at_start:
+                        self.logger.info(
+                            f"Skipping song '{current_title}' as it already exists in recorded directory.")
+                        self._discard_current_recording("song exists in recorded directory")
+
+                        # Start next song
+                        self._click_next_btn()
+                        time.sleep(1)
+                        self._click_play_btn()
+
+                        new_song = self._get_current_song_info()
+                        self._handle_song_start(new_song)
+
                         self._reset_progress_bar()
                         self._start_recording()
                         self._click_play_btn()
