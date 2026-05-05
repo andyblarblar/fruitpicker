@@ -38,6 +38,7 @@ from mutagen.id3 import ID3, TIT2, TPE1, ID3NoHeaderError
 from selenium import webdriver
 from selenium.webdriver import ActionChains, Keys
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.webdriver import WebDriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.firefox.options import Options as FirefoxOptions
 from selenium.webdriver.remote.webelement import WebElement
@@ -288,55 +289,22 @@ class AppleMusicRecorder:
 
     def _get_current_song_info(self) -> dict:
         """Detect the current song information from the DOM.
-
-        The player LCD title/artist live inside the shadow DOM of <amp-lcd>, so we
-        use JavaScript to pierce it rather than regular CSS selectors.
-
-        DOM path:
-          [data-testid='player-lcd'] amp-lcd  (shadow host)
-            └─ shadowRoot
-                 └─ .lcd-meta__primary  amp-marquee-text
-                      └─ .lcd-meta-line__fragment[tabindex="0"]  ← title text
-                 └─ .lcd-meta__secondary  amp-marquee-text
-                      └─ .lcd-meta-line__fragment[tabindex="0"]  ← "Artist — Album"
         """
         nav_config = self.config.get("navigation", {})
         song_info = {"title": None, "artist": None, "track_number": None}
 
         try:
-            # Pierce the amp-lcd shadow root via JavaScript
-            title = self.driver.execute_script("""
-                try {
-                    const lcdHost = document.querySelector('[data-testid="player-lcd"] amp-lcd');
-                    if (!lcdHost || !lcdHost.shadowRoot) return null;
-                    const frag = lcdHost.shadowRoot.querySelector(
-                        '.lcd-meta__primary .lcd-meta-line__fragment[tabindex="0"]'
-                    );
-                    return frag ? frag.textContent.trim() : null;
-                } catch (e) { return null; }
-            """)
-
-            artist_raw = self.driver.execute_script("""
-                try {
-                    const lcdHost = document.querySelector('[data-testid="player-lcd"] amp-lcd');
-                    if (!lcdHost || !lcdHost.shadowRoot) return null;
-                    // Collect all fragments in the secondary line (artist — album)
-                    const frags = lcdHost.shadowRoot.querySelectorAll(
-                        '.lcd-meta__secondary .lcd-meta-line__fragment[tabindex="0"]'
-                    );
-                    return frags.length ? Array.from(frags).map(f => f.textContent).join('').trim() : null;
-                } catch (e) { return null; }
+            # Direct selectors are the easiest way
+            artist, title = self.driver.execute_script("""
+            let artist = document.querySelector("body > div > div > div.player-bar.player-bar__floating-player.svelte-szovzw > div > div > div.chrome-player__lcd.svelte-10rkf3 > div > div > div.player-lcd__metadata.svelte-1f9skug > div > div > div.marquee.marquee--secondary.svelte-iz4u89 > div > div > div > div.marquee-line__mask.svelte-iz4u89 > div > div:nth-child(1) > span > span:nth-child(1) > button")?.innerHTML
+            let title = document.querySelector("body > div > div > div.player-bar.player-bar__floating-player.svelte-szovzw > div > div > div.chrome-player__lcd.svelte-10rkf3 > div > div > div.player-lcd__metadata.svelte-1f9skug > div > div > div.lcd-meta__primary-container.svelte-qi6v2t > div > div > div > div > div.marquee-line__mask.svelte-iz4u89 > div > div:nth-child(1) > span > span")?.innerHTML
+            return [artist, title]
             """)
 
             if title:
-                song_info["title"] = title
-                self.logger.debug(f"Found title via shadow DOM: {title}")
-
-            if artist_raw:
-                # Format is "Artist — Album", keep only the artist part
-                parts = artist_raw.split(" — ")
-                song_info["artist"] = parts[0].strip()
-                self.logger.debug(f"Found artist via shadow DOM: {song_info['artist']}")
+                song_info["title"] = title.strip()
+            if artist:
+                song_info["artist"] = artist.strip()
 
             # FALLBACK: If shadow DOM query failed, try the regular track list
             if not song_info["title"]:
@@ -381,66 +349,19 @@ class AppleMusicRecorder:
 
     def _is_lcd_showing_play_button(self) -> bool:
         """Return True when LCD shows Play (and not Pause), indicating playback stopped.
-
-        Apple Music controls can be nested in open shadow roots, so this uses a
-        deep query in JS that walks shadow DOM boundaries.
         """
-        try:
-            state = self.driver.execute_script("""
-                function looksActive(el) {
-                    if (!el) return false;
-                    // Apple Music often toggles state via aria-hidden while keeping both
-                    // controls mounted, so prefer accessibility state over geometry.
-                    if (el.getAttribute('aria-hidden') === 'true') return false;
-                    if (el.disabled || el.getAttribute('aria-disabled') === 'true') return false;
+        playback_button_pause: WebElement = self.driver.find_element(By.CSS_SELECTOR, ".playback-play__pause")
+        playback_button_play: WebElement = self.driver.find_element(By.CSS_SELECTOR, ".playback-play__play")
 
-                    const style = window.getComputedStyle(el);
-                    if (style.display === 'none' || style.visibility === 'hidden') return false;
-                    return true;
-                }
+        pause_active = playback_button_pause.get_attribute(
+            "aria-hidden") is not None or not playback_button_pause.get_attribute(
+            "aria-hidden")
 
-                function deepQueryAll(root, selector, out) {
-                    if (!root) return;
-                    out.push(...root.querySelectorAll(selector));
-                    const all = root.querySelectorAll('*');
-                    for (const node of all) {
-                        if (node.shadowRoot) {
-                            deepQueryAll(node.shadowRoot, selector, out);
-                        }
-                    }
-                }
+        play_active = playback_button_play.get_attribute(
+            "aria-hidden") is not None or not playback_button_play.get_attribute(
+            "aria-hidden")
 
-                const playBtns = [];
-                const pauseBtns = [];
-                deepQueryAll(document, 'button.playback-play__play', playBtns);
-                deepQueryAll(document, 'button.playback-play__pause', pauseBtns);
-
-                const playActive = playBtns.some(looksActive);
-                const pauseActive = pauseBtns.some(looksActive);
-
-                return {
-                    playActive,
-                    pauseActive,
-                    playCount: playBtns.length,
-                    pauseCount: pauseBtns.length
-                };
-            """)
-
-            play_active = bool(state and state.get("playActive"))
-            pause_active = bool(state and state.get("pauseActive"))
-
-            self.logger.debug(
-                "LCD controls state: play_active=%s pause_active=%s play_count=%s pause_count=%s",
-                play_active,
-                pause_active,
-                state.get("playCount") if state else None,
-                state.get("pauseCount") if state else None,
-            )
-
-            return play_active and not pause_active
-        except Exception as e:
-            self.logger.debug(f"Could not read LCD play/pause state: {e}")
-            return False
+        return pause_active and not play_active
 
     def _get_monitor_device(self) -> int | None:
         """Configure PulseAudio to capture from the sink monitor (system audio loopback).
@@ -845,9 +766,8 @@ class AppleMusicRecorder:
 
                         # Reset song to start because it can take a second for the title to load
                         self._reset_progress_bar()
-                        self._click_play_btn()
-                        time.sleep(0.05)
                         self._start_recording()
+                        self._click_play_btn()
                         continue
         # This else runs when stop is called
         else:
@@ -856,27 +776,21 @@ class AppleMusicRecorder:
 
     def _click_play_btn(self) -> WebElement | None:
         """
-        Clicks and then returns the play/pause button element within the Apple Music player's shadow DOM structure.
+        Clicks and then returns the play/pause button element
 
         Returns:
             WebElement: The play/pause button element if found, otherwise None.
         """
-        # 1. Find the first shadow host
-        player_host = self.driver.find_element(By.CSS_SELECTOR, "amp-chrome-player")
-        player_shadow = player_host.shadow_root
+        playback_button_pause = self.driver.find_element(By.CSS_SELECTOR, ".playback-play__pause")
+        playback_button_play = self.driver.find_element(By.CSS_SELECTOR, ".playback-play__play")
 
-        # 2. Find the second shadow host inside the first shadow root
-        controls_host = player_shadow.find_element(By.CSS_SELECTOR, "apple-music-playback-controls")
-        controls_shadow = controls_host.shadow_root
-
-        # 3. Find the play/pause button in the second shadow root
-        playback_button_pause = controls_shadow.find_element(By.CSS_SELECTOR, ".playback-play__pause")
-        playback_button_play = controls_shadow.find_element(By.CSS_SELECTOR, ".playback-play__play")
-
-        if not (playback_button_pause or playback_button_play):
+        if playback_button_pause is None and playback_button_play is None:
             return None
+
+        if playback_button_play.get_attribute("aria-hidden"):
+            active_btn = playback_button_pause
         else:
-            active_btn = playback_button_pause if playback_button_pause else playback_button_play
+            active_btn = playback_button_play
 
         self.logger.info(f"Found playback-play__pause button. {active_btn} Clicking...")
         self.driver.execute_script("arguments[0].click();", active_btn)
@@ -888,7 +802,7 @@ class AppleMusicRecorder:
         Sets the progress bar to 0%.
         """
         # bar is in lcd shadow root
-        player_host = self.driver.find_element(By.CLASS_NAME, "lcd")
+        player_host = self.driver.find_element(By.CLASS_NAME, "progress")
         player_shadow = player_host.shadow_root
 
         # Main clickable progress bar
