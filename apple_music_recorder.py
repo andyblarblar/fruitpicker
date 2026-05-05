@@ -27,6 +27,7 @@ import signal
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from threading import Event, Lock, Thread
@@ -36,9 +37,8 @@ import ffmpeg
 import sounddevice as sd
 from mutagen.id3 import ID3, TIT2, TPE1, ID3NoHeaderError
 from selenium import webdriver
-from selenium.webdriver import ActionChains, Keys
+from selenium.webdriver import ActionChains
 from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.webdriver import WebDriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.firefox.options import Options as FirefoxOptions
 from selenium.webdriver.remote.webelement import WebElement
@@ -76,6 +76,9 @@ class AppleMusicRecorder:
 
         # Setup signal handlers for graceful shutdown
         self._setup_signal_handlers()
+
+        # Store songs that were already recorded before we start
+        self._songs_at_start = self._get_songs_in_recorded()
 
     def _load_config(self, config_path: str) -> dict:
         """Load configuration from JSON file."""
@@ -287,12 +290,9 @@ class AppleMusicRecorder:
             self.logger.debug(f"Error checking login status: {e}")
             return False
 
-    def _get_current_song_info(self) -> dict:
+    def _get_current_song_info(self) -> Song:
         """Detect the current song information from the DOM.
         """
-        nav_config = self.config.get("navigation", {})
-        song_info = {"title": None, "artist": None, "track_number": None}
-
         try:
             # Direct selectors are the easiest way
             artist, title = self.driver.execute_script("""
@@ -302,50 +302,38 @@ class AppleMusicRecorder:
             """)
 
             if title:
-                song_info["title"] = title.strip()
+                title = title.strip()
             if artist:
-                song_info["artist"] = artist.strip()
+                artist = artist.strip()
 
             # FALLBACK: If shadow DOM query failed, try the regular track list
-            if not song_info["title"]:
+            if not title:
                 self.logger.info("Shadow DOM title not found, falling back to track list...")
                 track_list_items = self.driver.find_elements(By.CSS_SELECTOR, "[data-testid='track-list-item']")
                 for item in track_list_items[:5]:
                     try:
                         title_el = item.find_element(By.CSS_SELECTOR, "[data-testid='track-title']")
                         if title_el and title_el.text.strip():
-                            song_info["title"] = title_el.text.strip()
-                            self.logger.debug(f"Found title from track list: {song_info['title']}")
+                            title = title_el.text.strip()
+                            self.logger.debug(f"Found title from track list: {title}")
                             try:
                                 artist_el = item.find_element(By.CSS_SELECTOR,
                                                               "[data-testid='track-title-by-line'] a")
                                 if artist_el:
-                                    song_info["artist"] = artist_el.text.strip()
+                                    artist = artist_el.text.strip()
                             except Exception:
                                 pass
                             break
                     except Exception:
                         continue
 
-            # Try to get track number from the track list
-            track_list_selector = nav_config.get("track_list_item_selector")
-            if track_list_selector:
-                track_list_items = self.driver.find_elements(By.CSS_SELECTOR, track_list_selector)
-                if track_list_items:
-                    try:
-                        track_number = track_list_items[0].get_attribute("data-row")
-                        if track_number:
-                            song_info["track_number"] = track_number
-                    except Exception:
-                        pass
-
-            if not song_info["title"]:
+            if not title:
                 self.logger.debug("Could not detect song title from shadow DOM or track list")
 
         except Exception as e:
             self.logger.warning(f"Error detecting song info: {e}")
 
-        return song_info
+        return Song(title, artist)
 
     def _is_lcd_showing_play_button(self) -> bool:
         """Return True when LCD shows Play (and not Pause), indicating playback stopped.
@@ -502,7 +490,7 @@ class AppleMusicRecorder:
             return audio_data
         return b''
 
-    def _save_audio(self, audio_data: bytes, song_info: dict):
+    def _save_audio(self, audio_data: bytes, song_info: Song):
         """Save recorded audio as MP3 file."""
         output_config = self.config.get("output", {})
         output_dir = Path(output_config.get("directory", "./recordings"))
@@ -516,16 +504,12 @@ class AppleMusicRecorder:
         output_dir.mkdir(parents=True, exist_ok=True)
 
         # Generate filename
-        track_num = song_info.get("track_number", "0")
-        artist = song_info.get("artist", "Unknown Artist")
-        title = song_info.get("title", "Unknown Title")
+        artist = song_info.artist
+        title = song_info.title
 
         # Sanitize filename
-        def sanitize(text):
-            return "".join(c for c in text if c.isalnum() or c in ' -_').strip()
-
         filename = naming_convention.format(
-            track_number=sanitize(str(track_num)),
+            track_number=sanitize(str(0)),
             artist=sanitize(artist),
             title=sanitize(title),
             timestamp=datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -607,11 +591,11 @@ class AppleMusicRecorder:
         except Exception as e:
             self.logger.error(f"Error saving WAV: {e}")
 
-    def _add_metadata(self, filepath: Path, song_info: dict):
+    def _add_metadata(self, filepath: Path, song_info: Song):
         """Add metadata to MP3 file."""
         try:
-            title = song_info.get("title", "")
-            artist = song_info.get("artist", "")
+            title = song_info.title
+            artist = song_info.artist
 
             # Load existing ID3 tags if present, otherwise create fresh ones
             try:
@@ -630,13 +614,13 @@ class AppleMusicRecorder:
         except Exception as e:
             self.logger.warning(f"Could not add metadata: {e}")
 
-    def _handle_song_start(self, song_info: dict):
+    def _handle_song_start(self, song_info: Song):
         """Handle song start event."""
         self.song_count += 1
-        self.current_recording = dict(song_info)
+        self.current_recording = song_info
         self.logger.info(f"=== Song #{self.song_count} ===")
-        self.logger.info(f"Title: {song_info.get('title', 'Unknown')}")
-        self.logger.info(f"Artist: {song_info.get('artist', 'Unknown')}")
+        self.logger.info(f"Title: {song_info.title}")
+        self.logger.info(f"Artist: {song_info.artist}")
 
         if self.on_song_start:
             self.on_song_start(self.song_count, song_info)
@@ -649,7 +633,7 @@ class AppleMusicRecorder:
 
             # Use the song that started this recording so title-change detection
             # does not save the file with the next track's metadata.
-            song_info = self.current_recording or {}
+            song_info = self.current_recording
 
             # Save the recording
             audio_data = self._stop_recording()
@@ -701,11 +685,11 @@ class AppleMusicRecorder:
                 self.logger.warning(f"Failed to click play button: {e}")
 
         # Detect first song
-        song_info = {}
-        while not song_info.get("title"):
+        song_info = Song(None, None)
+        while song_info.title is None:
             song_info = self._get_current_song_info()
-            if song_info["title"]:
-                self.logger.info(f"Detected initial song: {song_info['title']} by {song_info['artist']}")
+            if song_info.title:
+                self.logger.info(f"Detected initial song: {song_info.title} by {song_info.artist}")
                 self._handle_song_start(song_info)
                 self._start_recording()
             else:
@@ -729,7 +713,7 @@ class AppleMusicRecorder:
                 break
 
             # Wait for recording to complete
-            time.sleep(0.05)
+            time.sleep(0.1)
 
             # Exit cleanly when playback reaches playlist end and LCD returns to Play.
             if self._is_lcd_showing_play_button():
@@ -745,8 +729,26 @@ class AppleMusicRecorder:
             # End the current recording when Apple Music advances to a new title.
             if self.is_recording and self.current_recording:
                 current_song = self._get_current_song_info()
-                current_title = (current_song.get("title") or "").strip()
-                recording_title = (self.current_recording.get("title") or "").strip()
+                current_title = current_song.title.strip()
+                recording_title = self.current_recording.title.strip()
+
+                # Skip song if song exists in recorded directory
+                if Song(sanitize(current_song.title), sanitize(current_song.artist)) in self._songs_at_start:
+                    self.logger.info(f"Skipping song '{current_title}' as it already exists in recorded directory.")
+                    self._discard_current_recording("song exists in recorded directory")
+
+                    # Start next song
+                    self._click_next_btn()
+                    time.sleep(1)
+                    self._click_play_btn()
+
+                    new_song = self._get_current_song_info()
+                    self._handle_song_start(new_song)
+
+                    self._reset_progress_bar()
+                    self._start_recording()
+                    self._click_play_btn()
+                    continue
 
                 # Only log if titles are found (avoid spam)
                 if current_title and recording_title:
@@ -796,6 +798,16 @@ class AppleMusicRecorder:
         self.driver.execute_script("arguments[0].click();", active_btn)
 
         return active_btn
+
+    def _click_next_btn(self) -> WebElement | None:
+        """
+        Clicks the next button on the playback controls.
+        """
+        next_root = self.driver.find_element(By.CSS_SELECTOR, ".next")
+        btn = next_root.shadow_root.find_element(By.CSS_SELECTOR, ".button--next")
+
+        btn.click()
+        return btn
 
     def _reset_progress_bar(self) -> None:
         """
@@ -909,13 +921,30 @@ class AppleMusicRecorder:
             self.logger.info("Recorded songs:")
             for i, song in enumerate(self.recorded_songs, 1):
                 self.logger.info(
-                    f"  {i}. {song['song_info'].get('title', 'Unknown')} - "
-                    f"{song['song_info'].get('artist', 'Unknown')} "
+                    f"  {i}. {song['song_info'].title} - "
+                    f"{song['song_info'].artist} "
                     f"({song['duration']:.1f}s)"
                 )
 
         self.logger.info(f"Output directory: {self.config.get('output', {}).get('directory', './recordings')}")
         self.logger.info("=" * 50)
+
+    def _get_songs_in_recorded(self) -> set[Song]:
+        """Return a list of Song objects from the recorded directory."""
+        base = Path(self.config["output"]["directory"])
+
+        return set([Song(s.name.split("_")[1].strip(".mp3"), s.name.split("_")[0]) for s in base.iterdir() if
+                    s.is_file() and s.suffix == ".mp3"])
+
+
+@dataclass(eq=True, frozen=True)
+class Song:
+    title: str
+    artist: str
+
+
+def sanitize(text):
+    return "".join(c for c in text if c.isalnum() or c in ' -_').strip()
 
 
 def main():
