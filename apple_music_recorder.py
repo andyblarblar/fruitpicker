@@ -342,14 +342,12 @@ class AppleMusicRecorder:
         playback_button_play: WebElement = self.driver.find_element(By.CSS_SELECTOR, ".playback-play__play")
 
         pause_active = playback_button_pause.get_attribute(
-            "aria-hidden") is not None or not playback_button_pause.get_attribute(
-            "aria-hidden")
+            "aria-hidden") is None
 
         play_active = playback_button_play.get_attribute(
-            "aria-hidden") is not None or not playback_button_play.get_attribute(
-            "aria-hidden")
+            "aria-hidden") is None
 
-        return pause_active and not play_active
+        return not pause_active and play_active
 
     def _get_monitor_device(self) -> int | None:
         """Configure PulseAudio to capture from the sink monitor (system audio loopback).
@@ -713,15 +711,16 @@ class AppleMusicRecorder:
                 break
 
             # Wait for recording to complete
-            time.sleep(0.1)
+            time.sleep(0.5)
 
             # Exit cleanly when playback reaches playlist end and LCD returns to Play.
             if self._is_lcd_showing_play_button():
+                self.logger.info("LCD Play button is visible...")
                 self._play_button_visible_streak += 1
             else:
                 self._play_button_visible_streak = 0
 
-            if self._play_button_visible_streak >= 1000:
+            if self._play_button_visible_streak >= 20:
                 self.logger.info("Detected LCD Play button state at playlist end. Stopping recorder.")
                 self.stop()
                 continue
@@ -752,6 +751,12 @@ class AppleMusicRecorder:
                         self._reset_progress_bar()
                         self._start_recording()
                         self._click_play_btn()
+
+                        # Hack to fix issue where play sometimes doesnt play
+                        time.sleep(2)
+                        if self._is_lcd_showing_play_button():
+                            self.logger.info("Issue with play button. Clicking again...")
+                            self._click_play_btn()
                         continue
                     # Skip song if song exists in recorded directory
                     elif Song(sanitize(current_song.title), sanitize(current_song.artist)) in self._songs_at_start:
@@ -761,7 +766,7 @@ class AppleMusicRecorder:
 
                         # Start next song
                         self._click_next_btn()
-                        time.sleep(1)
+                        time.sleep(5)
                         self._click_play_btn()
 
                         new_song = self._get_current_song_info()
@@ -770,6 +775,13 @@ class AppleMusicRecorder:
                         self._reset_progress_bar()
                         self._start_recording()
                         self._click_play_btn()
+
+                        # Hack to fix issue where play sometimes doesnt play
+                        time.sleep(2)
+                        if self._is_lcd_showing_play_button():
+                            self.logger.info("Issue with play button. Clicking again...")
+                            self._click_play_btn()
+
                         continue
         # This else runs when stop is called
         else:
@@ -932,6 +944,9 @@ class AppleMusicRecorder:
     def _get_songs_in_recorded(self) -> set[Song]:
         """Return a list of Song objects from the recorded directory."""
         base = Path(self.config["output"]["directory"])
+
+        if not base.exists():
+            return set()
 
         return set([Song(s.name.split("_")[1].strip(".mp3"), s.name.split("_")[0]) for s in base.iterdir() if
                     s.is_file() and s.suffix == ".mp3"])
